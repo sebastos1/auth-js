@@ -1,4 +1,4 @@
-// todo session mgmt, cleanup, invalidation, etc
+// not handling expiration here, if you use this in production you deserve what you get
 class DevSessionStore {
     constructor() {
         this.store = new Map();
@@ -34,6 +34,7 @@ export default class OAuth2Server {
             redirectUri: config.redirectUri || `${config.authServer}/success`,
             successUri: config.successUri || "/",
             services: config.services || {},
+            refreshTokenLifetime: config.refreshTokenLifetime || (30 * 24 * 60 * 60) // 30 days
         };
         this.sessionStore = sessionStore || new DevSessionStore();
     }
@@ -65,8 +66,8 @@ export default class OAuth2Server {
                 codeVerifier,
                 state,
                 isPopup,
-                expiresAt: Date.now() + 600000
-            }, 600000);
+                expiresAt: Date.now() + this.config.refreshTokenLifetime * 1000
+            }, this.config.refreshTokenLifetime * 1000);
             const params = new URLSearchParams({
                 client_id: this.config.clientId,
                 redirect_uri: this.config.redirectUri,
@@ -81,7 +82,7 @@ export default class OAuth2Server {
                 status: 302,
                 headers: {
                     "Location": authUrl,
-                    "Set-Cookie": this.setSessionCookie(sessionId, 600)
+                    "Set-Cookie": this.setSessionCookie(sessionId, this.config.refreshTokenLifetime)
                 }
             });
         }
@@ -172,13 +173,11 @@ export default class OAuth2Server {
                     headers: { "Content-Type": "text/html" }
                 });
             }
-            // 30 days per auth server (todo move out)?
-            const maxAge = 30 * 24 * 60 * 60;
             return new Response(null, {
                 status: 302,
                 headers: {
                     "Location": this.config.successUri,
-                    "Set-Cookie": this.setSessionCookie(sessionId, maxAge)
+                    "Set-Cookie": this.setSessionCookie(sessionId, this.config.refreshTokenLifetime)
                 }
             });
         }
@@ -203,7 +202,7 @@ export default class OAuth2Server {
             }
         });
     }
-    async refresh(session) {
+    async refresh(session, sessionId) {
         const response = await fetch(`${this.config.authServer}/token`, {
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -214,8 +213,9 @@ export default class OAuth2Server {
             })
         });
         if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Refresh token exchange failed: ${response.status} - ${errorText}`);
+            if (sessionId)
+                await this.sessionStore.delete(sessionId);
+            throw new Error(`Refresh token exchange failed: ${response.status}`);
         }
         const tokens = await response.json();
         session.accessToken = tokens.access_token;
@@ -236,7 +236,7 @@ export default class OAuth2Server {
         let response = await this.makeRequest(request, session.accessToken);
         if (response.status === 401 && session.refreshToken) {
             try {
-                await this.refresh(session);
+                await this.refresh(session, sessionId);
                 await this.sessionStore.set(sessionId, session);
                 response = await this.makeRequest(request, session.accessToken);
             }
@@ -276,13 +276,19 @@ export default class OAuth2Server {
     async checkSession(request) {
         const sessionId = this.getSessionId(request);
         const session = sessionId ? await this.sessionStore.get(sessionId) : null;
-        if (session?.accessToken && session.expiresAt > Date.now()) {
-            return new Response(JSON.stringify({
-                authenticated: true,
-                userInfo: session.userInfo
-            }), {
-                headers: { "Content-Type": "application/json" }
-            });
+        if (session?.accessToken) {
+            if (session.expiresAt > Date.now()) {
+                return new Response(JSON.stringify({
+                    authenticated: true,
+                    userInfo: session.userInfo
+                }), {
+                    headers: { "Content-Type": "application/json" }
+                });
+            }
+            else {
+                if (sessionId)
+                    await this.sessionStore.delete(sessionId);
+            }
         }
         return new Response(JSON.stringify({ authenticated: false }), {
             headers: { "Content-Type": "application/json" }

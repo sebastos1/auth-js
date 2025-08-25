@@ -5,6 +5,7 @@ export interface Config {
     redirectUri?: string;
     successUri?: string;
     services?: Record<string, string>;
+    refreshTokenLifetime?: number;
 }
 interface SessionData {
     accessToken: string;
