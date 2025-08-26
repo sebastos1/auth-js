@@ -30,4 +30,6 @@ const auth = new OAuth2Client({});
 await auth.login() // basically
 ```
 
-
+## Considerations
+- There's no reauthentication flag for "sensitive operations"
+- 32 byte random for now

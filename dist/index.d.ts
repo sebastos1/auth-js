@@ -25,6 +25,7 @@ export interface SessionStore {
 export default class OAuth2Server {
     private config;
     private sessionStore;
+    private sessionCookieName;
     constructor(config: Config, sessionStore?: SessionStore);
     private generateCode;
     private sha256;

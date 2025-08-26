@@ -25,6 +25,7 @@ class DevSessionStore {
 }
 export default class OAuth2Server {
     constructor(config, sessionStore) {
+        this.sessionCookieName = "session_id";
         if (!config?.clientId)
             throw new Error("Client ID is required");
         if (!config?.authServer)
@@ -39,6 +40,9 @@ export default class OAuth2Server {
             refreshTokenLifetime: config.refreshTokenLifetime || (30 * 24 * 60 * 60),
             debug: config.debug || false
         };
+        if (!this.config.debug) {
+            this.sessionCookieName = "__Host-session_id"; // wont work if bff on different domain but whatever
+        }
         this.sessionStore = sessionStore || new DevSessionStore();
     }
     generateCode(length) {
@@ -53,13 +57,13 @@ export default class OAuth2Server {
         return btoa(String.fromCharCode(...new Uint8Array(hash))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
     }
     setSessionCookie(sessionId, maxAgeSeconds) {
-        // return `session_id=${sessionId}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}`;
-        return serialize("session_id", sessionId, {
+        return serialize(this.sessionCookieName, sessionId, {
             httpOnly: true,
-            secure: true,
+            secure: !this.config.debug,
             sameSite: "strict",
             path: "/",
-            maxAge: maxAgeSeconds
+            maxAge: maxAgeSeconds,
+            // domain?
         });
     }
     async login(request) {
@@ -114,8 +118,8 @@ export default class OAuth2Server {
             })
         });
         if (!response.ok) {
-            this.log("Token exchange failed:", response.status, await response.text());
             const errorText = await response.text();
+            this.log("Token exchange failed:", response.status, errorText);
             throw new Error(`Token exchange failed: ${errorText}`);
         }
         return await response.json();
@@ -130,7 +134,7 @@ export default class OAuth2Server {
         if (!cookieHeader)
             return null;
         const cookies = parse(cookieHeader);
-        return cookies.session_id || null;
+        return cookies[this.sessionCookieName] || null;
     }
     log(...args) {
         const time = new Date().toISOString();

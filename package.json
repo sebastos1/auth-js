@@ -1,6 +1,6 @@
 {
   "name": "sjallabong-auth",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "description": "Oauth2 SDK for sjallabong auth",
   "types": "dist/index.d.ts",
   "type": "module",
