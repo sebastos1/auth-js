@@ -116,14 +116,17 @@ export default class OAuth2Client {
     async callApi(path: string, options: RequestInit = {}) {
         const url = `${this.bffUrl}${this.paths.api}${path}`;
         console.log("Calling API:", url, options);
+
+        const headers = new Headers({
+            "X-CSRF-Token": "1",
+            ...options.headers // if u want, but employ brain first
+        })
+        if (options.body) headers.set("Content-Type", "application/json"); // todo
+
         const response = await fetch(url, {
             ...options,
             credentials: "include",
-            headers: {
-                "Content-Type": "application/json",
-                "X-CSRF-Token": "1",
-                ...options.headers
-            }
+            headers
         });
 
         if (response.status === 401) await this.checkAuth();

@@ -6,5 +6,6 @@ export const oauth = new OAuth2Server({
     redirectUri: 'http://localhost:5173/auth/callback',
     services: {
         "/test": "http://localhost:3002"
-    }
+    },
+    debug: true
 });

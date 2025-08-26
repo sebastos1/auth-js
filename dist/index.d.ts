@@ -6,6 +6,7 @@ export interface Config {
     successUri?: string;
     services?: Record<string, string>;
     refreshTokenLifetime?: number;
+    debug?: boolean;
 }
 interface SessionData {
     accessToken: string;
@@ -32,10 +33,14 @@ export default class OAuth2Server {
     private getTokens;
     private decodeIdToken;
     private getSessionId;
+    private log;
+    private err;
     callback(request: Request): Promise<Response>;
     logout(request: Request): Promise<Response>;
     private refresh;
     fetchApi(request: Request): Promise<Response>;
+    private isPathSafe;
+    private sanitizeHeaders;
     private makeRequest;
     checkSession(request: Request): Promise<Response>;
 }

@@ -1,3 +1,5 @@
+import { parse, serialize } from "cookie";
+
 export interface Config {
     clientId: string;
     authServer: string;
@@ -6,6 +8,7 @@ export interface Config {
     successUri?: string;
     services?: Record<string, string>;
     refreshTokenLifetime?: number; // seconds
+    debug?: boolean;
 }
 
 interface TokenResponse {
@@ -33,11 +36,13 @@ export interface SessionStore {
     delete(key: string): Promise<void>;
 }
 
+// todo: rate limiting considerations
+
 // not handling expiration here, if you use this in production you deserve what you get
 class DevSessionStore implements SessionStore {
     private store = new Map<string, { data: SessionData; expires: number }>();
 
-    async set(key: string, value: SessionData, ttlMs = 600000): Promise<void> {
+    async set(key: string, value: SessionData, ttlMs: number): Promise<void> {
         this.store.set(key, {
             data: value,
             expires: Date.now() + ttlMs
@@ -73,7 +78,8 @@ export default class OAuth2Server {
             redirectUri: config.redirectUri || `${config.authServer}/success`,
             successUri: config.successUri || "/",
             services: config.services || {},
-            refreshTokenLifetime: config.refreshTokenLifetime || (30 * 24 * 60 * 60) // 30 days
+            refreshTokenLifetime: config.refreshTokenLifetime || (30 * 24 * 60 * 60), // 30 days,
+            debug: config.debug || false
         };
 
         this.sessionStore = sessionStore || new DevSessionStore();
@@ -93,7 +99,14 @@ export default class OAuth2Server {
     }
 
     private setSessionCookie(sessionId: string, maxAgeSeconds: number): string {
-        return `session_id=${sessionId}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}`;
+        // return `session_id=${sessionId}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}`;
+        return serialize("session_id", sessionId, {
+            httpOnly: true,
+            secure: true,
+            sameSite: "strict",
+            path: "/",
+            maxAge: maxAgeSeconds
+        })
     }
 
     async login(request: Request): Promise<Response> {
@@ -135,10 +148,8 @@ export default class OAuth2Server {
                 }
             });
         } catch (error) {
-            return new Response(JSON.stringify({ error: "Login initiation failed" }), {
-                status: 500,
-                headers: { "Content-Type": "application/json" }
-            });
+            this.log("Login error:", error);
+            return this.err(500, "Login initiation failed");
         }
     }
 
@@ -156,6 +167,7 @@ export default class OAuth2Server {
         });
 
         if (!response.ok) {
+            this.log("Token exchange failed:", response.status, await response.text());
             const errorText = await response.text();
             throw new Error(`Token exchange failed: ${errorText}`);
         }
@@ -170,13 +182,23 @@ export default class OAuth2Server {
     }
 
     private getSessionId(request: Request): string | null {
-        const cookies = request.headers.get("cookie");
-        if (!cookies) return null;
+        const cookieHeader = request.headers.get("cookie");
+        if (!cookieHeader) return null;
+        const cookies = parse(cookieHeader);
+        return cookies.session_id || null;
+    }
 
-        const sessionMatch = cookies.match(/session_id=([^;]+)/);
-        if (!sessionMatch) return null;
+    private log(...args: any[]): void {
+        const time = new Date().toISOString();
+        if (this.config.debug) console.log(`[${time}]`, ...args);
+    }
 
-        return sessionMatch[1];
+    private err(status: number, message: string): Response {
+        message = this.config.debug ? message : "Error";
+        return new Response(JSON.stringify({ error: message }), {
+            status,
+            headers: { "Content-Type": "application/json" }
+        })
     }
 
     async callback(request: Request): Promise<Response> {
@@ -187,14 +209,14 @@ export default class OAuth2Server {
             const error = url.searchParams.get("error");
 
             if (error) return new Response(null, { status: 302, headers: { "Location": `${this.config.redirectUri}?error=${error}` } });
-            if (!auth_code || !state) return new Response("Missing authorization code or state", { status: 400 });
+            if (!auth_code || !state) return this.err(400, "Missing authorization code or state");
 
             const sessionId = this.getSessionId(request);
-            if (!sessionId) return new Response("Invalid session", { status: 400 });
+            if (!sessionId) return this.err(400, "Invalid session");
             const session = await this.sessionStore.get(sessionId);
-            if (!session) return new Response("Invalid session", { status: 400 });
-            if (session.state !== state) return new Response("State mismatch", { status: 400 });
-            if (!session.codeVerifier) return new Response("Missing code verifier", { status: 400 });
+            if (!session) return this.err(400, "Invalid session");
+            if (session.state !== state) return this.err(400, "State mismatch");
+            if (!session.codeVerifier) return this.err(400, "Missing code verifier");
 
             // authorization code -> tokens
             const tokens = await this.getTokens(auth_code, session.codeVerifier);
@@ -221,7 +243,7 @@ export default class OAuth2Server {
                         }, window.location.origin);
                     }
                     window.close();
-                    </script>`;
+                </script>`;
 
                 return new Response(script, {
                     status: 200,
@@ -237,16 +259,13 @@ export default class OAuth2Server {
                 }
             });
         } catch (error) {
-            console.error("Callback error:", error);
-            return new Response(JSON.stringify({ error: "Authentication failed" }), {
-                status: 500,
-                headers: { "Content-Type": "application/json" }
-            });
+            this.log("Callback error:", error);
+            return this.err(500, "Callback processing failed");
         }
     }
 
     async logout(request: Request): Promise<Response> {
-        if (!request.headers.get('X-CSRF-Token')) return new Response("Forbidden", { status: 403 });
+        if (!request.headers.get("X-CSRF-Token")) return this.err(403, "Forbidden");
         const sessionId = this.getSessionId(request);
         if (sessionId) await this.sessionStore.delete(sessionId);
         return new Response(null, {
@@ -269,25 +288,31 @@ export default class OAuth2Server {
         });
 
         if (!response.ok) {
+            this.log("Refresh token exchange failed:", response.status, await response.text());
             if (sessionId) await this.sessionStore.delete(sessionId);
             throw new Error(`Refresh token exchange failed: ${response.status}`);
         }
 
-        const tokens = await response.json();
-        session.accessToken = tokens.access_token;
-        session.refreshToken = tokens.refresh_token;
-        session.expiresAt = Date.now() + (tokens.expires_in * 1000);
+        const tokens: TokenResponse = await response.json();
+        Object.assign(session, {
+            accessToken: tokens.access_token,
+            refreshToken: tokens.refresh_token || session.refreshToken, // keep old if not rotated
+            expiresAt: Date.now() + (tokens.expires_in * 1000)
+        });
     }
 
     // bff proxy
     async fetchApi(request: Request): Promise<Response> {
-        if (request.method !== 'GET' && !request.headers.get('X-CSRF-Token')) return new Response("Forbidden", { status: 403 });
+        if (request.method !== "GET" && !request.headers.get("X-CSRF-Token")) return this.err(403, "Forbidden");
 
         const sessionId = this.getSessionId(request);
-        if (!sessionId) return new Response("No session", { status: 401 });
+        if (!sessionId) {
+            this.log("No session ID found");
+            return this.err(401, "No session");
+        }
 
         const session = await this.sessionStore.get(sessionId);
-        if (!session?.accessToken) return new Response("Unauthorized", { status: 401 });
+        if (!session?.accessToken) return this.err(401, "No access token");
 
         // try initial request with access
         let response = await this.makeRequest(request, session.accessToken);
@@ -297,38 +322,66 @@ export default class OAuth2Server {
                 await this.sessionStore.set(sessionId, session);
                 response = await this.makeRequest(request, session.accessToken);
             } catch (error) {
-                return new Response("Unauthorized", { status: 401 });
+                this.log("Token refresh failed:", error);
+                return this.err(401, "Session expired");
             }
         }
 
         return response;
     }
 
+    private isPathSafe(path: string): boolean {
+        try {
+            path = decodeURIComponent(path);
+        } catch {
+            this.log("Failed to decode path:", path);
+            return false;
+        }
+
+        try {
+            const url = new URL(path, "http://localhost/"); // base needed, dw
+            const normalizedPath = url.pathname;
+            return !normalizedPath.includes("../") &&
+                !normalizedPath.includes("..\\") &&
+                normalizedPath.startsWith("/");
+        } catch {
+            this.log("Failed to parse path:", path);
+            return false;
+        }
+    }
+
+    private sanitizeHeaders(headers: Headers): Headers {
+        const cleanHeaders = new Headers();
+        const allowed = ["accept", "content-type"]; // todo?
+
+        headers.forEach((value, key) => {
+            if (allowed.includes(key.toLowerCase())) {
+                cleanHeaders.set(key, value);
+            }
+        });
+
+        return cleanHeaders;
+    }
+
     private async makeRequest(request: Request, accessToken: string): Promise<Response> {
         const url = new URL(request.url);
-        console.log("got url:", url);
-        console.log("Configured services:", this.config.services);
         const servicePath = Object.keys(this.config.services).find(path => url.pathname.startsWith(path));
-        if (!servicePath) return new Response("Service not found", { status: 404 });
-        console.log("Matched service path:", servicePath);
+        if (!servicePath) return this.err(404, "Unknown service");
 
-        // path traversal
+        const requestPath = url.pathname.slice(servicePath.length);
+        if (!this.isPathSafe(requestPath)) return this.err(400, "Invalid path");
+
         const baseUrl = this.config.services[servicePath].replace(/\/$/, "");
-        const targetUrl = `${baseUrl}${url.pathname.slice(servicePath.length)}`;
-        if (!targetUrl.startsWith(baseUrl + "/") && targetUrl !== baseUrl) return new Response("Invalid target", { status: 400 });
-        console.log("Proxying to:", targetUrl);
+        const targetUrl = `${baseUrl}${requestPath}`;
 
-        const proxyHeaders = new Headers(request.headers);
-        proxyHeaders.delete("cookie");
-        proxyHeaders.delete("X-CSRF-Token");
-        proxyHeaders.set("Authorization", `Bearer ${accessToken}`);
-
-        console.log("Proxying request to:", targetUrl, request.method, proxyHeaders);
-        console.log("final url:", targetUrl + url.search);
+        const headers = this.sanitizeHeaders(request.headers);
+        headers.set("Authorization", `Bearer ${accessToken}`);
+        headers.set("User-Agent", "Mozilla/5.0 (compatible; BFF-Proxy/1.0)");
+        this.log("Proxying request to:", targetUrl + url.search, request.method);
 
         return fetch(targetUrl + url.search, {
             method: request.method,
-            headers: proxyHeaders,
+            headers,
             body: request.body
         });
     }
