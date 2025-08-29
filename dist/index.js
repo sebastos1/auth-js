@@ -2,9 +2,7 @@ import { parse, serialize } from "cookie";
 // todo: rate limiting considerations
 // not handling expiration here, if you use this in production you deserve what you get
 class DevSessionStore {
-    constructor() {
-        this.store = new Map();
-    }
+    store = new Map();
     async set(key, value, ttlMs) {
         this.store.set(key, {
             data: value,
@@ -24,8 +22,10 @@ class DevSessionStore {
     }
 }
 export default class OAuth2Server {
+    config;
+    sessionStore;
+    sessionCookieName = "session_id";
     constructor(config, sessionStore) {
-        this.sessionCookieName = "session_id";
         if (!config?.clientId)
             throw new Error("Client ID is required");
         if (!config?.authServer)
@@ -33,15 +33,16 @@ export default class OAuth2Server {
         this.config = {
             clientId: config.clientId,
             authServer: config.authServer,
-            scope: config.scope || "openid profile",
+            scope: config.scope || "openid profile", // maybe these should be explicitly set
             redirectUri: config.redirectUri || `${config.authServer}/success`,
             successUri: config.successUri || "/",
             services: config.services || {},
-            refreshTokenLifetime: config.refreshTokenLifetime || (30 * 24 * 60 * 60),
+            publicRoutes: config.publicRoutes || [],
+            refreshTokenLifetime: config.refreshTokenLifetime || (30 * 24 * 60 * 60), // 30 days,
             debug: config.debug || false
         };
         if (!this.config.debug) {
-            this.sessionCookieName = "__Host-session_id"; // wont work if bff on different domain but whatever
+            this.sessionCookieName = "__Host-session_id"; // todo ?
         }
         this.sessionStore = sessionStore || new DevSessionStore();
     }
@@ -216,7 +217,7 @@ export default class OAuth2Server {
         if (sessionId)
             await this.sessionStore.delete(sessionId);
         return new Response(null, {
-            status: 204,
+            status: 204, // rare 204
             headers: {
                 "Set-Cookie": this.setSessionCookie("", 0)
             }
@@ -241,7 +242,7 @@ export default class OAuth2Server {
         const tokens = await response.json();
         Object.assign(session, {
             accessToken: tokens.access_token,
-            refreshToken: tokens.refresh_token || session.refreshToken,
+            refreshToken: tokens.refresh_token || session.refreshToken, // keep old if not rotated
             expiresAt: Date.now() + (tokens.expires_in * 1000)
         });
     }
@@ -249,6 +250,14 @@ export default class OAuth2Server {
     async fetchApi(request) {
         if (request.method !== "GET" && !request.headers.get("X-CSRF-Token"))
             return this.err(403, "Forbidden");
+        this.log("Fetch API request:", request.method, request.url);
+        this.log("public routes: ", this.config.publicRoutes);
+        const url = new URL(request.url);
+        this.log("Request path:", url.pathname);
+        const isPublicRoute = this.config.publicRoutes?.includes(url.pathname);
+        this.log("Is public route:", isPublicRoute);
+        if (isPublicRoute)
+            return this.makeRequest(request, "");
         const sessionId = this.getSessionId(request);
         if (!sessionId) {
             this.log("No session ID found");
@@ -307,20 +316,27 @@ export default class OAuth2Server {
         const servicePath = Object.keys(this.config.services).find(path => url.pathname.startsWith(path));
         if (!servicePath)
             return this.err(404, "Unknown service");
+        if (this.config.debug) {
+            console.log("URL pathname:", url.pathname);
+            console.log("Service paths:", Object.keys(this.config.services));
+            console.log("Matched service path:", servicePath);
+        }
         const requestPath = url.pathname.slice(servicePath.length);
         if (!this.isPathSafe(requestPath))
             return this.err(400, "Invalid path");
         const baseUrl = this.config.services[servicePath].replace(/\/$/, "");
         const targetUrl = `${baseUrl}${requestPath}`;
         const headers = this.sanitizeHeaders(request.headers);
-        headers.set("Authorization", `Bearer ${accessToken}`);
+        if (accessToken)
+            headers.set("Authorization", `Bearer ${accessToken}`);
         headers.set("User-Agent", "Mozilla/5.0 (compatible; BFF-Proxy/1.0)");
         this.log("Proxying request to:", targetUrl + url.search, request.method);
         return fetch(targetUrl + url.search, {
             method: request.method,
             headers,
-            body: request.body
-        });
+            body: request.body,
+            duplex: "half"
+        }); // bruh
     }
     // authenticated: bool, userInfo: object|null
     async checkSession(request) {

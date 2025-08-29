@@ -7,6 +7,7 @@ export interface Config {
     redirectUri?: string;
     successUri?: string;
     services?: Record<string, string>;
+    publicRoutes?: string[]; // paths that dont need auth
     refreshTokenLifetime?: number; // seconds
     debug?: boolean;
 }
@@ -79,12 +80,13 @@ export default class OAuth2Server {
             redirectUri: config.redirectUri || `${config.authServer}/success`,
             successUri: config.successUri || "/",
             services: config.services || {},
+            publicRoutes: config.publicRoutes || [],
             refreshTokenLifetime: config.refreshTokenLifetime || (30 * 24 * 60 * 60), // 30 days,
             debug: config.debug || false
         };
         
         if (!this.config.debug) {
-            this.sessionCookieName = "__Host-session_id"; // wont work if bff on different domain but whatever
+            this.sessionCookieName = "__Host-session_id"; // todo ?
         }
         
         this.sessionStore = sessionStore || new DevSessionStore();
@@ -310,6 +312,16 @@ export default class OAuth2Server {
     async fetchApi(request: Request): Promise<Response> {
         if (request.method !== "GET" && !request.headers.get("X-CSRF-Token")) return this.err(403, "Forbidden");
 
+        this.log("Fetch API request:", request.method, request.url);
+        this.log("public routes: ", this.config.publicRoutes);
+
+        const url = new URL(request.url);
+        this.log("Request path:", url.pathname);
+        const isPublicRoute = this.config.publicRoutes?.includes(url.pathname);
+        this.log("Is public route:", isPublicRoute);
+
+        if (isPublicRoute) return this.makeRequest(request, "");
+
         const sessionId = this.getSessionId(request);
         if (!sessionId) {
             this.log("No session ID found");
@@ -373,6 +385,12 @@ export default class OAuth2Server {
         const servicePath = Object.keys(this.config.services).find(path => url.pathname.startsWith(path));
         if (!servicePath) return this.err(404, "Unknown service");
 
+        if (this.config.debug) {
+            console.log("URL pathname:", url.pathname);
+            console.log("Service paths:", Object.keys(this.config.services));
+            console.log("Matched service path:", servicePath);
+        }
+
         const requestPath = url.pathname.slice(servicePath.length);
         if (!this.isPathSafe(requestPath)) return this.err(400, "Invalid path");
 
@@ -380,15 +398,16 @@ export default class OAuth2Server {
         const targetUrl = `${baseUrl}${requestPath}`;
 
         const headers = this.sanitizeHeaders(request.headers);
-        headers.set("Authorization", `Bearer ${accessToken}`);
+        if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
         headers.set("User-Agent", "Mozilla/5.0 (compatible; BFF-Proxy/1.0)");
         this.log("Proxying request to:", targetUrl + url.search, request.method);
 
         return fetch(targetUrl + url.search, {
             method: request.method,
             headers,
-            body: request.body
-        });
+            body: request.body,
+            duplex: "half"
+        } as any); // bruh
     }
 
     // authenticated: bool, userInfo: object|null

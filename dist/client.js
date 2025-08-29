@@ -1,6 +1,8 @@
 export default class OAuth2Client {
+    bffUrl;
+    user = null;
+    paths;
     constructor(config) {
-        this.user = null;
         this.bffUrl = config.bffUrl ? config.bffUrl.replace(/\/$/, "") : "";
         this.paths = config.paths || { auth: "/auth", api: "/api" };
         this.checkAuth();

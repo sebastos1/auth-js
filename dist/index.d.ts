@@ -5,6 +5,7 @@ export interface Config {
     redirectUri?: string;
     successUri?: string;
     services?: Record<string, string>;
+    publicRoutes?: string[];
     refreshTokenLifetime?: number;
     debug?: boolean;
 }

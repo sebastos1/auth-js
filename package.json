@@ -1,6 +1,6 @@
 {
   "name": "sjallabong-auth",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "description": "Oauth2 SDK for sjallabong auth",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -31,6 +31,8 @@
   },
   "homepage": "https://gitlab.com/sjallabong/sjallabong-auth-js#readme",
   "dependencies": {
-    "cookie": "^1.0.2"
+    "@types/node": "^24.3.0",
+    "cookie": "^1.0.2",
+    "typescript": "^5.9.2"
   }
 }
