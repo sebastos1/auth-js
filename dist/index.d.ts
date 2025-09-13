@@ -27,16 +27,17 @@ export default class OAuth2Server {
     private config;
     private sessionStore;
     private sessionCookieName;
+    private jwks?;
     constructor(config: Config, sessionStore?: SessionStore);
     private generateCode;
     private sha256;
     private setSessionCookie;
     login(request: Request): Promise<Response>;
     private getTokens;
-    private decodeIdToken;
     private getSessionId;
     private log;
     private err;
+    private validateJwt;
     callback(request: Request): Promise<Response>;
     logout(request: Request): Promise<Response>;
     private refresh;

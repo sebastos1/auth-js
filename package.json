@@ -1,6 +1,6 @@
 {
   "name": "sjallabong-auth",
-  "version": "1.1.8",
+  "version": "1.2.0",
   "description": "Oauth2 SDK for sjallabong auth",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -33,6 +33,7 @@
   "dependencies": {
     "@types/node": "^24.3.0",
     "cookie": "^1.0.2",
+    "jose": "^6.1.0",
     "typescript": "^5.9.2"
   }
 }

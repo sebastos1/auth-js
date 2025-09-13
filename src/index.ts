@@ -1,4 +1,5 @@
 import { parse, serialize } from "cookie";
+import { jwtVerify, createRemoteJWKSet } from 'jose';
 
 export interface Config {
     clientId: string;
@@ -68,6 +69,7 @@ export default class OAuth2Server {
     private config: Required<Config>;
     private sessionStore: SessionStore;
     private sessionCookieName = "session_id";
+    private jwks?: any;
 
     constructor(config: Config, sessionStore?: SessionStore) {
         if (!config?.clientId) throw new Error("Client ID is required");
@@ -90,6 +92,7 @@ export default class OAuth2Server {
         }
         
         this.sessionStore = sessionStore || new DevSessionStore();
+        this.jwks = createRemoteJWKSet(new URL(`${this.config.authServer}/.well-known/jwks.json`));
     }
 
     private generateCode(length: number): string {
@@ -182,12 +185,6 @@ export default class OAuth2Server {
         return await response.json();
     }
 
-    private decodeIdToken(idToken: string): any {
-        const payload = idToken.split(".")[1];
-        const decoded = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
-        return JSON.parse(decoded);
-    }
-
     private getSessionId(request: Request): string | null {
         const cookieHeader = request.headers.get("cookie");
         if (!cookieHeader) return null;
@@ -206,6 +203,19 @@ export default class OAuth2Server {
             status,
             headers: { "Content-Type": "application/json" }
         })
+    }
+
+    private async validateJwt(token: string): Promise<any> {
+        try {
+            const { payload } = await jwtVerify(token, this.jwks, {
+                issuer: this.config.authServer,
+                audience: this.config.clientId,
+            });
+            return payload;
+        } catch (error) {
+            this.log("Token validation failed:", error);
+            throw error;
+        }
     }
 
     async callback(request: Request): Promise<Response> {
@@ -227,11 +237,27 @@ export default class OAuth2Server {
 
             // authorization code -> tokens
             const tokens = await this.getTokens(auth_code, session.codeVerifier);
+
+            if (tokens.access_token) {
+                try {
+                    await this.validateJwt(tokens.access_token);
+                } catch (error) {
+                    this.log("Invalid access token:", error);
+                    return this.err(400, "Invalid access token");
+                }
+            }
+
             session.accessToken = tokens.access_token;
             session.refreshToken = tokens.refresh_token;
             session.expiresAt = Date.now() + (tokens.expires_in * 1000);
             if (tokens.id_token) {
-                session.userInfo = this.decodeIdToken(tokens.id_token);
+                try {
+                    const idTokenPayload = await this.validateJwt(tokens.id_token);
+                    session.userInfo = idTokenPayload;
+                } catch (error) {
+                    this.log("Invalid ID token:", error);
+                    return this.err(400, "Invalid ID token");
+                }
             }
 
             const isPopup = session.isPopup || false;

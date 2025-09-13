@@ -1,4 +1,5 @@
 import { parse, serialize } from "cookie";
+import { jwtVerify, createRemoteJWKSet } from 'jose';
 // todo: rate limiting considerations
 // not handling expiration here, if you use this in production you deserve what you get
 class DevSessionStore {
@@ -25,6 +26,7 @@ export default class OAuth2Server {
     config;
     sessionStore;
     sessionCookieName = "session_id";
+    jwks;
     constructor(config, sessionStore) {
         if (!config?.clientId)
             throw new Error("Client ID is required");
@@ -45,6 +47,7 @@ export default class OAuth2Server {
             this.sessionCookieName = "__Host-session_id"; // todo ?
         }
         this.sessionStore = sessionStore || new DevSessionStore();
+        this.jwks = createRemoteJWKSet(new URL(`${this.config.authServer}/.well-known/jwks.json`));
     }
     generateCode(length) {
         const array = new Uint8Array(length);
@@ -125,11 +128,6 @@ export default class OAuth2Server {
         }
         return await response.json();
     }
-    decodeIdToken(idToken) {
-        const payload = idToken.split(".")[1];
-        const decoded = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
-        return JSON.parse(decoded);
-    }
     getSessionId(request) {
         const cookieHeader = request.headers.get("cookie");
         if (!cookieHeader)
@@ -148,6 +146,19 @@ export default class OAuth2Server {
             status,
             headers: { "Content-Type": "application/json" }
         });
+    }
+    async validateJwt(token) {
+        try {
+            const { payload } = await jwtVerify(token, this.jwks, {
+                issuer: this.config.authServer,
+                audience: this.config.clientId,
+            });
+            return payload;
+        }
+        catch (error) {
+            this.log("Token validation failed:", error);
+            throw error;
+        }
     }
     async callback(request) {
         try {
@@ -171,11 +182,27 @@ export default class OAuth2Server {
                 return this.err(400, "Missing code verifier");
             // authorization code -> tokens
             const tokens = await this.getTokens(auth_code, session.codeVerifier);
+            if (tokens.access_token) {
+                try {
+                    await this.validateJwt(tokens.access_token);
+                }
+                catch (error) {
+                    this.log("Invalid access token:", error);
+                    return this.err(400, "Invalid access token");
+                }
+            }
             session.accessToken = tokens.access_token;
             session.refreshToken = tokens.refresh_token;
             session.expiresAt = Date.now() + (tokens.expires_in * 1000);
             if (tokens.id_token) {
-                session.userInfo = this.decodeIdToken(tokens.id_token);
+                try {
+                    const idTokenPayload = await this.validateJwt(tokens.id_token);
+                    session.userInfo = idTokenPayload;
+                }
+                catch (error) {
+                    this.log("Invalid ID token:", error);
+                    return this.err(400, "Invalid ID token");
+                }
             }
             const isPopup = session.isPopup || false;
             delete session.codeVerifier;
